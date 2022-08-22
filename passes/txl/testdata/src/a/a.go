@@ -9,21 +9,21 @@ import (
 func testcase1() {
 	var db *sql.DB
 
-	tx, err := db.Begin() // want "transaction variable declared here is used 3 times until COMMIT"
+	tx, err := db.Begin() // want tx:`transaction variable declared here is used 3 times until COMMIT \[album, album, album\]`
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	tx.Exec(`INSERT INTO album (title, artist, price) VALUES ("transaction", "tx",10)`) // want "INSERT album"
+	tx.Exec(`INSERT INTO album (title, artist, price) VALUES ("transaction", "tx",10)`)
 
-	_, err = tx.Exec(`INSERT INTO album (title, artist, price) VALUES ("transaction", "tx",10)`) // want "INSERT album"
+	_, err = tx.Exec(`INSERT INTO album (title, artist, price) VALUES ("transaction", "tx",10)`)
 	if err != nil {
 		if err := tx.Rollback(); err != nil {
 			log.Println(err)
 		}
 	}
 
-	if _, err = tx.Exec(`INSERT INTO album (title, artist, price) VALUES ("transaction", "tx",10)`); err != nil { // want "INSERT album"
+	if _, err = tx.Exec(`INSERT INTO album (title, artist, price) VALUES ("transaction", "tx",10)`); err != nil {
 		if err := tx.Rollback(); err != nil {
 			log.Println(err)
 		}
@@ -55,19 +55,19 @@ func (t *T) Exec(s string) (sql.Result, error) {
 func testcase2() {
 	var db *sql.DB
 
-	tx, err := db.Begin() // want "transaction variable declared here is used 2 times until COMMIT"
+	tx, err := db.Begin() // want tx:`transaction variable declared here is used 2 times until COMMIT \[album, album\]`
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	tx.Exec(`INSERT INTO album (title, artist, price) VALUES ("transaction", "tx",10)`) // want "INSERT album"
+	tx.Exec(`INSERT INTO album (title, artist, price) VALUES ("transaction", "tx",10)`)
 
 	{
 		tx := &T{1}
 		tx.Exec(`INSERT INTO album (title, artist, price) VALUES ("transaction", "tx",10)`)
 	}
 
-	_, err = tx.Exec(`INSERT INTO album (title, artist, price) VALUES ("transaction", "tx",10)`) // want "INSERT album"
+	_, err = tx.Exec(`INSERT INTO album (title, artist, price) VALUES ("transaction", "tx",10)`)
 	if err != nil {
 		if err := tx.Rollback(); err != nil {
 			log.Println(err)
@@ -89,12 +89,12 @@ type Album struct {
 func testcase3() {
 	var db *sql.DB
 
-	tx, err := db.Begin() // want "transaction variable declared here is used 2 times until COMMIT"
+	tx, err := db.Begin() // want tx:`transaction variable declared here is used 2 times until COMMIT \[album, album\]`
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	_, err = addAlbumTx(tx, Album{ // want "INSERT album"
+	_, err = addAlbumTx(tx, Album{
 		Title:  "transaction1",
 		Artist: "tx1",
 		Price:  59.99,
@@ -105,7 +105,7 @@ func testcase3() {
 		}
 	}
 
-	if _, err = addAlbumTx(tx, Album{ // want "INSERT album"
+	if _, err = addAlbumTx(tx, Album{
 		Title:  "transaction2",
 		Artist: "tx2",
 		Price:  69.99,

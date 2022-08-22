@@ -1,9 +1,12 @@
 package txl
 
 import (
+	"fmt"
 	"go/ast"
+	"go/token"
 	"go/types"
 	"regexp"
+	"strings"
 
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/analysis/passes/buildssa"
@@ -11,6 +14,33 @@ import (
 	"golang.org/x/tools/go/ast/inspector"
 	"golang.org/x/tools/go/ssa"
 )
+
+type txCalledFact struct {
+	Var    *types.Var
+	Tables []string
+}
+
+func newTxCalledFact(v *types.Var) *txCalledFact {
+	return &txCalledFact{
+		Var:    v,
+		Tables: make([]string, 0),
+	}
+}
+
+func (tcf *txCalledFact) AFact() {}
+func (tcf *txCalledFact) String() string {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("transaction variable declared here is used %d times until COMMIT", len(tcf.Tables)))
+	sb.WriteString(" [")
+	for i, t := range tcf.Tables {
+		if i != 0 {
+			sb.WriteString(", ")
+		}
+		sb.WriteString(t)
+	}
+	sb.WriteString("]")
+	return sb.String()
+}
 
 var (
 	Analyzer = &analysis.Analyzer{
@@ -21,6 +51,7 @@ var (
 			inspect.Analyzer,
 			buildssa.Analyzer,
 		},
+		FactTypes: []analysis.Fact{(*txCalledFact)(nil)},
 	}
 
 	insertExp = regexp.MustCompile(`^.*INSERT\s+INTO\s+(\w+)\s+.*`)
@@ -66,44 +97,9 @@ func run(pass *analysis.Pass) (interface{}, error) {
 				break
 			}
 		}
-
-		// count transaction call
-		for _, b := range f.Blocks {
-			for i := range b.Instrs {
-				if instr, ok := b.Instrs[i].(*ssa.Extract); ok {
-					// only target first of tuple element
-					if instr.Index != 0 {
-						continue
-					}
-
-					v0 := instr.Tuple.Type().(*types.Tuple).At(0)
-					if !isPtrTx(v0.Type()) {
-						continue
-					}
-
-					var callcnt int
-					for _, ref := range *instr.Referrers() {
-						call, ok := ref.(*ssa.Call)
-						if !ok {
-							continue
-						}
-						f, ok := call.Common().Value.(*ssa.Function)
-						if !ok {
-							continue
-						}
-						if isTxCommit(f) {
-							break
-						}
-						if !isTxRollback(f) {
-							callcnt++
-						}
-					}
-					pass.Reportf(instr.Tuple.Pos(), "transaction variable declared here is used %d times until COMMIT", callcnt)
-				}
-			}
-		}
 	}
 
+	TxCalledFactMap := make(map[token.Pos]*txCalledFact)
 	nodeFilter := []ast.Node{
 		(*ast.CallExpr)(nil),
 	}
@@ -166,10 +162,18 @@ func run(pass *analysis.Pass) (interface{}, error) {
 				continue
 			}
 
+			var tcf *txCalledFact
+			var ok bool
 			switch f := callexpr.Fun.(type) {
 			case *ast.SelectorExpr: // tx.Exec(hoge)
 				if !isPtrTxExpr(pass, f.X) {
 					continue
+				}
+
+				pos := pass.TypesInfo.ObjectOf(f.X.(*ast.Ident)).Pos()
+				tcf, ok = TxCalledFactMap[pos]
+				if !ok || tcf == nil {
+					tcf = newTxCalledFact(pass.TypesInfo.ObjectOf(f.X.(*ast.Ident)).(*types.Var))
 				}
 
 				switch f.Sel.Name {
@@ -184,14 +188,35 @@ func run(pass *analysis.Pass) (interface{}, error) {
 						continue
 					} else {
 						for _, r := range res[1:] {
-							pass.Reportf(f.Pos(), "INSERT %s", r)
+							tcf.Tables = append(tcf.Tables, r)
 						}
 					}
 				case "Commit":
 				}
-			case *ast.Ident: // f()
+
+				TxCalledFactMap[pos] = tcf
+			case *ast.Ident: // f(tx, ...)
 				ident, ok := callexpr.Fun.(*ast.Ident)
 				if !ok {
+					continue
+				}
+
+				var txExists bool
+				var pos token.Pos
+				for _, arg := range callexpr.Args {
+					obj := pass.TypesInfo.ObjectOf(arg.(*ast.Ident))
+					if isPtrTx(obj.Type()) {
+						pos = obj.Pos()
+						tcf, ok = TxCalledFactMap[pos]
+						if !ok || tcf == nil {
+							tcf = newTxCalledFact(obj.(*types.Var))
+						}
+						txExists = true
+						break
+					}
+				}
+				if !txExists {
+					// no tx in argument
 					continue
 				}
 
@@ -200,13 +225,19 @@ func run(pass *analysis.Pass) (interface{}, error) {
 					continue
 				}
 				for _, table := range tables {
-					pass.Reportf(f.Pos(), "INSERT %s", table)
+					tcf.Tables = append(tcf.Tables, table)
 				}
+
+				TxCalledFactMap[pos] = tcf
 			}
 		}
 
 		return true
 	})
+
+	for _, tcf := range TxCalledFactMap {
+		pass.ExportObjectFact(tcf.Var, tcf)
+	}
 
 	return nil, nil
 }
